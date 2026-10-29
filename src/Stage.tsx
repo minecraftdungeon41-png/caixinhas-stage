@@ -3,93 +3,60 @@ import {StageBase, StageResponse, InitialData, Message} from "@chub-ai/stages-ts
 import {LoadResponse} from "@chub-ai/stages-ts/dist/types/load";
 
 /***
- The type that this stage persists message-level state in.
- This is primarily for readability, and not enforced.
-
- @description This type is saved in the database after each message,
-  which makes it ideal for storing things like positions and statuses,
-  but not for things like history, which is best managed ephemerally
-  in the internal state of the Stage class itself.
+ Stage "Caixinhas de Opções"
+ - Pede para a IA terminar cada resposta com opções dentro de <opcoes>...</opcoes>
+ - Tira as opções do texto da história e mostra como caixinhas no painel do stage
+ - Quando você digita só um número (ex: "2"), troca pelo texto da opção 2
  ***/
-type MessageStateType = any;
 
-/***
- The type of the stage-specific configuration of this stage.
+type MessageStateType = {
+    opcoes: string[];
+};
 
- @description This is for things you want people to be able to configure,
-  like background color.
- ***/
 type ConfigType = any;
-
-/***
- The type that this stage persists chat initialization state in.
- If there is any 'constant once initialized' static state unique to a chat,
- like procedurally generated terrain that is only created ONCE and ONLY ONCE per chat,
- it belongs here.
- ***/
 type InitStateType = any;
-
-/***
- The type that this stage persists dynamic chat-level state in.
- This is for any state information unique to a chat,
-    that applies to ALL branches and paths such as clearing fog-of-war.
- It is usually unlikely you will need this, and if it is used for message-level
-    data like player health then it will enter an inconsistent state whenever
-    they change branches or jump nodes. Use MessageStateType for that.
- ***/
 type ChatStateType = any;
 
-/***
- A simple example class that implements the interfaces necessary for a Stage.
- If you want to rename it, be sure to modify App.js as well.
- @link https://github.com/CharHubAI/chub-stages-ts/blob/main/src/types/stage.ts
- ***/
+// Instrução enviada para a IA em toda mensagem (não aparece no chat).
+const INSTRUCAO = `[Instrução do sistema: ao final da sua resposta, ofereça de 2 a 4 opções curtas do que {{user}} pode fazer em seguida. Escreva cada opção em uma linha, dentro das tags exatamente assim:
+<opcoes>
+Primeira opção
+Segunda opção
+Terceira opção
+</opcoes>
+Não numere as opções e não escreva nada depois de </opcoes>.]`;
+
+// Acha o bloco <opcoes>...</opcoes> (aceita também a tag sem fechar no final).
+const REGEX_OPCOES = /<opcoes>([\s\S]*?)(<\/opcoes>|$)/i;
+
+function extrairOpcoes(texto: string): { historia: string; opcoes: string[] } {
+    const match = texto.match(REGEX_OPCOES);
+    if (!match) {
+        return {historia: texto, opcoes: []};
+    }
+    const opcoes = match[1]
+        .split("\n")
+        .map(linha => linha.replace(/^\s*(\[?\d+[\].)\-:]?|[-*•])\s*/, "").trim())
+        .filter(linha => linha.length > 0)
+        .slice(0, 6);
+    const historia = texto.replace(REGEX_OPCOES, "").trim();
+    return {historia, opcoes};
+}
+
 export class Stage extends StageBase<InitStateType, ChatStateType, MessageStateType, ConfigType> {
 
-    /***
-     A very simple example internal state. Can be anything.
-     This is ephemeral in the sense that it isn't persisted to a database,
-     but exists as long as the instance does, i.e., the chat page is open.
-     ***/
-    myInternalState: {[key: string]: any};
+    opcoes: string[] = [];
+    copiada: number | null = null;
 
     constructor(data: InitialData<InitStateType, ChatStateType, MessageStateType, ConfigType>) {
-        /***
-         This is the first thing called in the stage,
-         to create an instance of it.
-         The definition of InitialData is at @link https://github.com/CharHubAI/chub-stages-ts/blob/main/src/types/initial.ts
-         Character at @link https://github.com/CharHubAI/chub-stages-ts/blob/main/src/types/character.ts
-         User at @link https://github.com/CharHubAI/chub-stages-ts/blob/main/src/types/user.ts
-         ***/
         super(data);
-        const {
-            characters,         // @type:  { [key: string]: Character }
-            users,                  // @type:  { [key: string]: User}
-            config,                                 //  @type:  ConfigType
-            messageState,                           //  @type:  MessageStateType
-            environment,                     // @type: Environment (which is a string)
-            initState,                             // @type: null | InitStateType
-            chatState                              // @type: null | ChatStateType
-        } = data;
-        this.myInternalState = messageState != null ? messageState : {'someKey': 'someValue'};
-        this.myInternalState['numUsers'] = Object.keys(users).length;
-        this.myInternalState['numChars'] = Object.keys(characters).length;
+        const {messageState} = data;
+        this.opcoes = messageState?.opcoes ?? [];
     }
 
     async load(): Promise<Partial<LoadResponse<InitStateType, ChatStateType, MessageStateType>>> {
-        /***
-         This is called immediately after the constructor, in case there is some asynchronous code you need to
-         run on instantiation.
-         ***/
         return {
-            /*** @type boolean @default null
-             @description The 'success' boolean returned should be false IFF (if and only if), some condition is met that means
-              the stage shouldn't be run at all and the iFrame can be closed/removed.
-              For example, if a stage displays expressions and no characters have an expression pack,
-              there is no reason to run the stage, so it would return false here. ***/
             success: true,
-            /*** @type null | string @description an error message to show
-             briefly at the top of the screen, if any. ***/
             error: null,
             initState: null,
             chatState: null,
@@ -97,109 +64,118 @@ export class Stage extends StageBase<InitStateType, ChatStateType, MessageStateT
     }
 
     async setState(state: MessageStateType): Promise<void> {
-        /***
-         This can be called at any time, typically after a jump to a different place in the chat tree
-         or a swipe. Note how neither InitState nor ChatState are given here. They are not for
-         state that is affected by swiping.
-         ***/
-        if (state != null) {
-            this.myInternalState = {...this.myInternalState, ...state};
-        }
+        // Chamado quando você troca de swipe ou volta numa mensagem antiga.
+        this.opcoes = state?.opcoes ?? [];
+        this.copiada = null;
     }
 
     async beforePrompt(userMessage: Message): Promise<Partial<StageResponse<ChatStateType, MessageStateType>>> {
-        /***
-         This is called after someone presses 'send', but before anything is sent to the LLM.
-         ***/
-        const {
-            content,            /*** @type: string
-             @description Just the last message about to be sent. ***/
-            anonymizedId,       /*** @type: string
-             @description An anonymized ID that is unique to this individual
-              in this chat, but NOT their Chub ID. ***/
-            isBot             /*** @type: boolean
-             @description Whether this is itself from another bot, ex. in a group chat. ***/
-        } = userMessage;
+        const texto = userMessage.content.trim();
+        let mensagemNova: string | null = null;
+
+        // Se você digitou só um número, troca pelo texto da opção.
+        const numero = texto.match(/^\[?(\d+)\]?$/);
+        if (numero) {
+            const indice = parseInt(numero[1], 10) - 1;
+            if (indice >= 0 && indice < this.opcoes.length) {
+                mensagemNova = this.opcoes[indice];
+            }
+        }
+
+        // Limpa as caixinhas enquanto a IA pensa na próxima resposta.
+        this.opcoes = [];
+        this.copiada = null;
+
         return {
-            /*** @type null | string @description A string to add to the
-             end of the final prompt sent to the LLM,
-             but that isn't persisted. ***/
-            stageDirections: null,
-            /*** @type MessageStateType | null @description the new state after the userMessage. ***/
-            messageState: {'someKey': this.myInternalState['someKey']},
-            /*** @type null | string @description If not null, the user's message itself is replaced
-             with this value, both in what's sent to the LLM and in the database. ***/
-            modifiedMessage: null,
-            /*** @type null | string @description A system message to append to the end of this message.
-             This is unique in that it shows up in the chat log and is sent to the LLM in subsequent messages,
-             but it's shown as coming from a system user and not any member of the chat. If you have things like
-             computed stat blocks that you want to show in the log, but don't want the LLM to start trying to
-             mimic/output them, they belong here. ***/
+            stageDirections: INSTRUCAO,
+            messageState: {opcoes: []},
+            modifiedMessage: mensagemNova,
             systemMessage: null,
-            /*** @type null | string @description an error message to show
-             briefly at the top of the screen, if any. ***/
             error: null,
             chatState: null,
         };
     }
 
     async afterResponse(botMessage: Message): Promise<Partial<StageResponse<ChatStateType, MessageStateType>>> {
-        /***
-         This is called immediately after a response from the LLM.
-         ***/
-        const {
-            content,            /*** @type: string
-             @description The LLM's response. ***/
-            anonymizedId,       /*** @type: string
-             @description An anonymized ID that is unique to this individual
-              in this chat, but NOT their Chub ID. ***/
-            isBot             /*** @type: boolean
-             @description Whether this is from a bot, conceivably always true. ***/
-        } = botMessage;
+        const {historia, opcoes} = extrairOpcoes(botMessage.content);
+        this.opcoes = opcoes;
+        this.copiada = null;
+
         return {
-            /*** @type null | string @description A string to add to the
-             end of the final prompt sent to the LLM,
-             but that isn't persisted. ***/
             stageDirections: null,
-            /*** @type MessageStateType | null @description the new state after the botMessage. ***/
-            messageState: {'someKey': this.myInternalState['someKey']},
-            /*** @type null | string @description If not null, the bot's response itself is replaced
-             with this value, both in what's sent to the LLM subsequently and in the database. ***/
-            modifiedMessage: null,
-            /*** @type null | string @description an error message to show
-             briefly at the top of the screen, if any. ***/
+            messageState: {opcoes},
+            // Só reescreve a mensagem se tinha opções nela.
+            modifiedMessage: opcoes.length > 0 ? historia : null,
             error: null,
             systemMessage: null,
-            chatState: null
+            chatState: null,
         };
     }
 
+    async copiar(indice: number) {
+        try {
+            await navigator.clipboard.writeText(this.opcoes[indice]);
+            this.copiada = indice;
+        } catch {
+            this.copiada = null;
+        }
+    }
 
     render(): ReactElement {
-        /***
-         There should be no "work" done here. Just returning the React element to display.
-         If you're unfamiliar with React and prefer video, I've heard good things about
-         @link https://scrimba.com/learn/learnreact but haven't personally watched/used it.
+        const estiloCaixa = {
+            display: 'flex',
+            gap: '10px',
+            alignItems: 'flex-start',
+            textAlign: 'left' as const,
+            width: '100%',
+            padding: '12px 14px',
+            borderRadius: '12px',
+            border: '1px solid rgba(255,255,255,0.18)',
+            background: 'rgba(255,255,255,0.06)',
+            color: 'inherit',
+            font: 'inherit',
+            fontSize: '15px',
+            lineHeight: 1.4,
+            cursor: 'pointer',
+        };
+        const estiloNumero = {
+            flexShrink: 0,
+            width: '24px',
+            height: '24px',
+            borderRadius: '50%',
+            display: 'grid',
+            placeItems: 'center',
+            fontSize: '13px',
+            fontWeight: 700,
+            background: 'rgba(255,255,255,0.15)',
+        };
 
-         For creating 3D and game components, react-three-fiber
-           @link https://docs.pmnd.rs/react-three-fiber/getting-started/introduction
-           and the associated ecosystem of libraries are quite good and intuitive.
-
-         Cuberun is a good example of a game built with them.
-           @link https://github.com/akarlsten/cuberun (Source)
-           @link https://cuberun.adamkarlsten.com/ (Demo)
-         ***/
         return <div style={{
             width: '100vw',
             height: '100vh',
-            display: 'grid',
-            alignItems: 'stretch'
+            boxSizing: 'border-box',
+            padding: '14px',
+            overflowY: 'auto',
+            color: '#eee',
+            fontFamily: 'system-ui, sans-serif',
         }}>
-            <div>Hello World! I'm an empty stage! With {this.myInternalState['someKey']}!</div>
-            <div>There is/are/were {this.myInternalState['numChars']} character(s)
-                and {this.myInternalState['numUsers']} human(s) here.
-            </div>
+            {this.opcoes.length === 0 ? (
+                <div style={{opacity: 0.6, fontSize: '14px'}}>
+                    As opções vão aparecer aqui depois da próxima resposta.
+                </div>
+            ) : (
+                <div style={{display: 'flex', flexDirection: 'column', gap: '8px'}}>
+                    <div style={{opacity: 0.7, fontSize: '13px', marginBottom: '2px'}}>
+                        Digite o número no chat para escolher:
+                    </div>
+                    {this.opcoes.map((opcao, i) => (
+                        <button key={i} style={estiloCaixa} onClick={() => this.copiar(i)}>
+                            <span style={estiloNumero}>{i + 1}</span>
+                            <span>{opcao}{this.copiada === i ? '  ✓ copiado' : ''}</span>
+                        </button>
+                    ))}
+                </div>
+            )}
         </div>;
     }
-
 }
