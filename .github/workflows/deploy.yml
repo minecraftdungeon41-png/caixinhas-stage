@@ -112,6 +112,12 @@ jobs:
       - name: Zip the build folder
         run: cd dist && zip -r ../build.zip * && cd ../
 
+      - name: Save build for manual upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage-build
+          path: dist/
+
       - name: Upload the build
         if: ${{ !contains(github.repository, 'template') }}
         env:
